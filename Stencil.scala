@@ -2,6 +2,8 @@ package Stencil
 
 import Chisel._
 
+import param._
+
 //Define a stallable, parameterizable shift register.
 object EnableShiftRegister
 {
@@ -77,8 +79,8 @@ class Stencil extends Module {
 
   //Update the indexes that are wires.
   i1 := io.stream_in
-  i4 := EnableShiftRegister(i3, 98, io.valid)
-  i7 := EnableShiftRegister(i6, 98, io.valid)
+  i4 := EnableShiftRegister(i3, gridx - 2, io.valid)
+  i7 := EnableShiftRegister(i6, gridy - 2, io.valid)
 
   //Update counter logic
   when (io.valid) {
