@@ -21,6 +21,7 @@ class FPAddStage1(val n: Int) extends Module {
     val io = new Bundle {
         val a = Bits(INPUT, n)
         val b = Bits(INPUT, n)
+        val en = Bool(INPUT)
 
         val b_larger = Bool(OUTPUT)
         val mant_shift = UInt(OUTPUT, expWidth)
@@ -43,28 +44,35 @@ class FPAddStage1(val n: Int) extends Module {
     val reg_b_larger = Reg(Bool())
     val reg_mant_shift = Reg(UInt(width = expWidth))
     val reg_exp = Reg(UInt(width = expWidth))
-    val reg_manta = Reg(next = a_wrap.mantissa)
-    val reg_mantb = Reg(next = b_wrap.mantissa)
+    val reg_manta = Reg(a_wrap.mantissa.clone())
+    val reg_mantb = Reg(b_wrap.mantissa.clone())
     val reg_sign = Reg(Bool())
-    val reg_sub = Reg(next = (a_wrap.sign ^ b_wrap.sign))
+    val reg_sub = Reg((a_wrap.sign ^ b_wrap.sign).clone())
 
     // In stage 1, we subtract the exponents
     // This will tell us which number is larger
     // as well as what we need to shift the smaller mantissa by
 
-    // b is larger
-    when (exp_diff(expWidth) === UInt(1)) {
-        // absolute value
-        reg_mant_shift := -exp_diff(expWidth - 1, 0)
-        //mant_shift := (~exp_diff) + UInt(1)
-        reg_b_larger := Bool(true)
-        reg_exp := b_wrap.exponent
-        reg_sign := b_wrap.sign
-    } .otherwise {
-        reg_mant_shift := exp_diff(expWidth - 1, 0)
-        reg_b_larger := Bool(false)
-        reg_exp := a_wrap.exponent
-        reg_sign := a_wrap.sign
+    when (io.en) {
+
+        reg_manta := a_wrap.mantissa
+        reg_mantb := b_wrap.mantissa
+        reg_sub := a_wrap.sign ^ b_wrap.sign
+
+        // b is larger
+        when (exp_diff(expWidth) === UInt(1)) {
+            // absolute value
+            reg_mant_shift := -exp_diff(expWidth - 1, 0)
+            //mant_shift := (~exp_diff) + UInt(1)
+            reg_b_larger := Bool(true)
+            reg_exp := b_wrap.exponent
+            reg_sign := b_wrap.sign
+        } .otherwise {
+            reg_mant_shift := exp_diff(expWidth - 1, 0)
+            reg_b_larger := Bool(false)
+            reg_exp := a_wrap.exponent
+            reg_sign := a_wrap.sign
+        }
     }
 
     io.mant_shift := reg_mant_shift
@@ -87,6 +95,7 @@ class FPAddStage2(val n: Int) extends Module {
         val b_larger = Bool(INPUT)
         val sign_in = Bool(INPUT)
         val sub_in = Bool(INPUT)
+        val en = Bool(INPUT)
 
         val manta_out = UInt(OUTPUT, mantWidth + 1)
         val mantb_out = UInt(OUTPUT, mantWidth + 1)
@@ -111,11 +120,19 @@ class FPAddStage2(val n: Int) extends Module {
 
     val shifted_mant = Mux(io.mant_shift > UInt(mantWidth + 1),
                            UInt(0), smaller_mant >> io.mant_shift)
-    val reg_manta = Reg(next = larger_mant)
-    val reg_mantb = Reg(next = shifted_mant)
-    val reg_sign = Reg(next = io.sign_in)
-    val reg_sub = Reg(next = io.sub_in)
-    val reg_exp = Reg(next = io.exp_in)
+    val reg_manta = Reg(larger_mant.clone())
+    val reg_mantb = Reg(shifted_mant.clone())
+    val reg_sign = Reg(io.sign_in.clone())
+    val reg_sub = Reg(io.sub_in.clone())
+    val reg_exp = Reg(io.exp_in.clone())
+
+    when(io.en) {
+        reg_manta := larger_mant
+        reg_mantb := shifted_mant
+        reg_sign := io.sign_in
+        reg_sub := io.sub_in
+        reg_exp := io.exp_in
+    }
 
     io.manta_out := reg_manta
     io.mantb_out := reg_mantb
@@ -133,6 +150,7 @@ class FPAddStage3(val n: Int) extends Module {
         val exp_in = UInt(INPUT, expWidth)
         val sign_in = Bool(INPUT)
         val sub = Bool(INPUT)
+        val en = Bool(INPUT)
 
         val mant_out = UInt(OUTPUT, mantWidth + 1)
         val sign_out = Bool(OUTPUT)
@@ -151,24 +169,26 @@ class FPAddStage3(val n: Int) extends Module {
     val reg_sign = Reg(Bool())
     val reg_exp = Reg(UInt(width = expWidth))
 
-    // this may happen if the operands were of opposite sign
-    // but had the same exponent
-    when (mant_sum(mantWidth + 1) === UInt(1)) {
-        when (io.sub) {
-            reg_mant := -mant_sum(mantWidth, 0)
-            reg_sign := !io.sign_in
-            reg_exp := io.exp_in
+    when (io.en) {
+        // this may happen if the operands were of opposite sign
+        // but had the same exponent
+        when (mant_sum(mantWidth + 1) === UInt(1)) {
+            when (io.sub) {
+                reg_mant := -mant_sum(mantWidth, 0)
+                reg_sign := !io.sign_in
+                reg_exp := io.exp_in
+            } .otherwise {
+                // if the sum overflowed, we need to shift back by one
+                // and increment the exponent
+                reg_mant := mant_sum(mantWidth + 1, 1)
+                reg_exp := io.exp_in + UInt(1)
+                reg_sign := io.sign_in
+            }
         } .otherwise {
-            // if the sum overflowed, we need to shift back by one
-            // and increment the exponent
-            reg_mant := mant_sum(mantWidth + 1, 1)
-            reg_exp := io.exp_in + UInt(1)
+            reg_mant := mant_sum(mantWidth, 0)
             reg_sign := io.sign_in
+            reg_exp := io.exp_in
         }
-    } .otherwise {
-        reg_mant := mant_sum(mantWidth, 0)
-        reg_sign := io.sign_in
-        reg_exp := io.exp_in
     }
 
     io.sign_out := reg_sign
@@ -207,6 +227,7 @@ class FPAdd(val n: Int) extends Module {
         val a = Bits(INPUT, n)
         val b = Bits(INPUT, n)
         val res = Bits(OUTPUT, n)
+        val en = Bool(INPUT)
     }
 
     val (expWidth, mantWidth) = getExpMantWidths(n)
@@ -215,6 +236,7 @@ class FPAdd(val n: Int) extends Module {
 
     stage1.io.a := io.a
     stage1.io.b := io.b
+    stage1.io.en := io.en
 
     val stage2 = Module(new FPAddStage2(n))
 
@@ -225,6 +247,7 @@ class FPAdd(val n: Int) extends Module {
     stage2.io.sub_in := stage1.io.sub
     stage2.io.b_larger := stage1.io.b_larger
     stage2.io.mant_shift := stage1.io.mant_shift
+    stage2.io.en := io.en
 
     val stage3 = Module(new FPAddStage3(n))
 
@@ -233,6 +256,7 @@ class FPAdd(val n: Int) extends Module {
     stage3.io.exp_in := stage2.io.exp_out
     stage3.io.sign_in := stage2.io.sign_out
     stage3.io.sub := stage2.io.sub_out
+    stage3.io.en := io.en
 
     val stage4 = Module(new FPAddStage4(n))
 

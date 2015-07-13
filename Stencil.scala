@@ -2,6 +2,7 @@ package Stencil
 import Chisel._
 import param._
 import ChiselFloat._
+import math.{ceil, pow, log}
 
 
 
@@ -21,294 +22,434 @@ object EnableShiftRegister
 }
 
 
-
-//Define a connection between the datapath and window arithmatic.
-class GridConnection extends Bundle {
-  val valid = Bool()
-  //TODO implement vec of vecs.
-  val row1 = Vec.fill(window){ UInt() }
-  val row2 = Vec.fill(window){ UInt() }
-  val row3 = Vec.fill(window){ UInt() }
-}
-
-
-
-class WindowArithmatic extends Module {
+class ExposedEnableSR(val len: Int) extends Module {
   val io = new Bundle {
-    val gc = new GridConnection().asInput
-    val stream_out = UInt(OUTPUT, 32)
+    val in = UInt(INPUT, 32)
+    val en = Bool(INPUT)
+    val outVec = Vec.fill(len){UInt(OUTPUT, 32)}
   }
-
-  //TODO look at x and y counters to handle invalid cases
-  when (io.gc.valid) {
-    io.stream_out := (io.gc.row1(0) + io.gc.row1(1) + io.gc.row1(2) + io.gc.row2(0) + io.gc.row2(1) + io.gc.row2(2) + io.gc.row3(0) + io.gc.row3(1) + io.gc.row3(2)) 
+  val regVec = Vec.fill(len){Reg(UInt(32))}
+  when (io.en) {
+    for (i <- len - 1 to 1 by -1) {
+      regVec(i) := regVec(i - 1)
+    }
+    regVec(0) := io.in
+  }
+  for (i <- 0 to len - 1) {
+    io.outVec(i) := regVec(i)
   }
 }
+
+
+object VecReverser {
+  def apply (in: Vec[UInt], n: Int): Vec[UInt] = {
+    val reverseVec = Vec.fill(n){UInt()}
+    for (i <- 0 to n - 1) {
+      reverseVec(i) := in(n - 1 - i)
+    }
+    reverseVec
+  }
+}
+
+
+
+
+
+
+class DelayGrid(val window_width: Int, val grid_width: Int) extends Module {
+  val window_size = pow(window_width, 2).toInt
+  val wireVec_size = window_width
+  val regVec_size = window_size - wireVec_size
+
+  val io = new Bundle {
+    val in = UInt(INPUT, 32)
+    val en = Bool(INPUT)
+    val outVec = Vec.fill(window_size){UInt(OUTPUT, 32)}
+  }
+
+  val wireVec = Vec.fill(wireVec_size){UInt()}
+  val regVec = Vec.fill(regVec_size){Reg(UInt(32))}
+
+  // Assign registers inputs
+  when (io.en) {
+    for (i <- 0 to regVec_size - 1) {
+      if (i % (window_width - 1) == 0) {
+        // Get input from wireVec
+        regVec(i) := wireVec(i / (window_width - 1))
+      } else {
+        // Get input from regVec
+        regVec(i) := regVec(i - 1)
+      }
+    }
+  }
+
+  // Assign wires inputs (including instantiation of shift registers)
+  wireVec(0) := io.in
+  for (i <- 1 to wireVec_size - 1) {
+    wireVec(i) := EnableShiftRegister(regVec(i * (window_width - 1) - 1), grid_width - (window_width - 1), io.en)
+  }
+
+
+  // Merge wire and register outputs into output vector
+  for (i <- 0 to window_width - 1) {
+    // First output of each row should be from a wire
+    io.outVec(i * window_width) := wireVec(i)
+    // Remaining window_width - 1 output of each row should be from registers
+    for (j <- 1 to window_width - 1) {
+      io.outVec(i * window_width + j) := regVec(i * (window_width - 1) + j - 1)
+    }
+  }
+
+}
+
+
+
+
+object FPMult32 {
+  def apply (a: UInt, b: UInt, en: Bool) = {
+    val multiplier = Module(new FPMult32())
+    multiplier.io.a := a
+    multiplier.io.b := b
+    multiplier.io.en := en
+    multiplier.io.res
+  }
+}
+
+
+object FPAdd32 {
+  def apply (a: UInt, b: UInt, en: Bool) = {
+    val adder = Module(new FPAdd32())
+    adder.io.a := a
+    adder.io.b := b
+    adder.io.en := en
+    adder.io.res
+  }
+}
+
+object FPAdd32Dummy {
+  def apply (a: UInt, en: Bool) = {
+    val adder = Module(new FPAdd32Dummy())
+    adder.io.a := a
+    adder.io.en := en
+    adder.io.res
+  }
+}
+
+
+
+class FPAdd32Dummy extends Module {
+  val io = new Bundle {
+      val a = Bits(INPUT, 32)
+      val res = Bits(OUTPUT, 32)
+      val en = Bool(INPUT)
+  }
+
+  val delay_1 = Reg(UInt(32))
+  val delay_2 = Reg(UInt(32))
+  val delay_3 = Reg(UInt(32))
+
+  when (io.en) {
+    delay_1 := io.a
+    delay_2 := delay_1
+    delay_3 := delay_2
+  }
+
+  io.res := delay_3
+}
+
+
+
+
+object FPAdd32_N {
+  def apply (in: Vec[UInt], en: Bool, n: Int): UInt = {
+    if (n == 2) {
+      FPAdd32(in(0), in(1), en)
+    } else {
+      val numAdds = n / 2
+      val numDummies = n % 2
+      val totalResults = numAdds + numDummies
+      val resultVec = Vec.fill(totalResults){UInt()}
+      for (i <- 0 to numAdds - 1) {
+        resultVec(i) := FPAdd32(in(i * 2), in(i * 2 + 1), en)
+      }
+      if (numDummies != 0) {
+        resultVec(numAdds) := FPAdd32Dummy(in(numAdds * 2), en)
+      }
+      apply(resultVec, en, totalResults)
+    }
+  }
+}
+
+
+object FPMult32withCoeff_N {
+  def apply (in: Vec[UInt], coeff: Vec[UInt], en: Bool, n: Int): Vec[UInt] = {
+    val resultVec = Vec.fill(n){UInt()}
+    for (i <- 0 to n - 1) {
+      resultVec(i) := FPMult32(in(i), coeff(i), en)
+    }
+    resultVec
+  }
+}
+
+
+
+
+
+
+
+
+
+
 
 
 
 class Stencil extends Module {
   val DataWidth = 32
-  
+
   val io = new Bundle { 
-    val stream_in = UInt(INPUT, DataWidth)
-    val valid = Bool(INPUT)
-    val stream_out = UInt(OUTPUT, DataWidth)
+    val in = new Bundle { 
+      val rd_en = Bool(OUTPUT)
+      val data = UInt(INPUT, DataWidth)
+      val empty = Bool(INPUT)
+    }
+
+    val out = new Bundle { 
+      val wr_en = Bool(OUTPUT)
+      val data = UInt(OUTPUT, DataWidth)
+      val full = Bool(INPUT)
+    }
+
+    val coeff = new Bundle { 
+      val rd_en = Bool(OUTPUT)
+      val data = UInt(INPUT, DataWidth)
+      val empty = Bool(INPUT)
+    }
   }
 
 
-  //Initialize discrete registers and wires of delay line.
-  val i1 = UInt()
-  val i2 = Reg(UInt())
-  val i3 = Reg(UInt())
-  val i4 = UInt()
-  val i5 = Reg(UInt())
-  val i6 = Reg(UInt())
-  val i7 = UInt()
-  val i8 = Reg(UInt())
-  val i9 = Reg(UInt())
+
+  // Make the in FIFO interface appear as a Ready Valid interface ???(Standard fifo interface already Ready valid not FWFT)???
+
+  val in_fifo_ready = Bool()
+  val in_fifo_valid = Reg(init = Bool(false))
+  // Dont think it should be reg
+  val in_fifo_data = UInt()
+
+  val in_fetch = (!io.in.empty && (in_fifo_ready || !in_fifo_valid))
+  io.in.rd_en := in_fetch
+  // Valid is a flip flop so 1 cycle delay between fetching and valid being asserted matches
+  // the one cycle delay between rd_en being asserted and valid data being presented.
+  in_fifo_valid := in_fetch
+  in_fifo_data := io.in.data
+
+  
 
 
-  //Update the indexes that are registers.
-  when (io.valid) {
-    i2 := i1
-    i3 := i2
-    i5 := i4
-    i6 := i5
-    i8 := i7
-    i9 := i8
+
+  io.coeff.rd_en := Bool(false)
+  val last_coeff_rd_en = Reg(Bool())
+  last_coeff_rd_en := Bool(false)
+
+  when (!io.coeff.empty) {
+    io.coeff.rd_en := Bool(true)
+    last_coeff_rd_en := Bool(true)
   }
 
-  //Update the indexes that are wires.
-  i1 := io.stream_in
-  i4 := EnableShiftRegister(i3, gridx - window - 1, io.valid)
-  i7 := EnableShiftRegister(i6, gridx - window - 1, io.valid)
+
+
+  val coeffSR = Module(new ExposedEnableSR(pow(window, 2).toInt))
+  coeffSR.io.in := io.coeff.data
+  coeffSR.io.en := last_coeff_rd_en
+  val coeffVec = coeffSR.io.outVec
 
 
 
-  //TODO Figure out why using connection results in null pointer connection
-
-  /*
-  //Initialize a connection between the delay line with the window arithmatic.
-  val gc = new GridConnection().asOutput
-  gc.valid := io.valid
-  gc.row1(0) := i9
-  gc.row1(1) := i8
-  gc.row1(2) := i7
-  gc.row2(0) := i6
-  gc.row2(1) := i5
-  gc.row2(2) := i4
-  gc.row3(0) := i3
-  gc.row3(1) := i2
-  gc.row3(2) := i1
-
-  //Initialize window arithmatic module
-  val window = Module(new WindowArithmatic())
-  window.io.gc := gc
-  io.stream_out := window.io.stream_out
-  */
-
-
-  // Convolution with weights
-
-  //Constants (eventually pull from memory instead of literals)
-  val w1 = UInt("h40490fd0")
-  val w2 = UInt("h40c90fe4")
-  val w3 = UInt("h4116cbe6")
-  val w4 = UInt("h41490ff9")
-  val w5 = UInt("h417b53f8")
-  val w6 = UInt("h4196cbfb")
-  val w7 = UInt("h41afedc6")
-  val w8 = UInt("h41c90fc5")
-  val w9 = UInt("h41e231c4")
-  //Sum extra outputs with zero to avoid timing problems for now.
-  val zero = UInt("h00000000")
-
-  //First layer of output registers
-  val m11 = Reg(UInt())
-  val m12 = Reg(UInt())
-  val m13 = Reg(UInt())
-  val m14 = Reg(UInt())
-  val m15 = Reg(UInt())
-  val m16 = Reg(UInt())
-  val m17 = Reg(UInt())
-  val m18 = Reg(UInt())
-  val m19 = Reg(UInt())
-
-  //Second layer of output registers
-  val a21 = Reg(UInt())
-  val a22 = Reg(UInt())
-  val a23 = Reg(UInt())
-  val a24 = Reg(UInt())
-  val a25 = Reg(UInt())
-
-  //Third layer of output registers
-  val a31 = Reg(UInt())
-  val a32 = Reg(UInt())
-  val a33 = Reg(UInt())
-
-  //Fourth layer of output registers
-  val a41 = Reg(UInt())
-  val a42 = Reg(UInt())
-
-  //First layer of multiplications
-
-  /* Let x be the index of the FPMult32 module to be created
-  val mul1x = Module(new FPMult32())
-  mul1x.io.a := ix
-  mul1x.io.b := wx
-  m1x := mul1x.io.res
-  */
-
-  val mul11 = Module(new FPMult32())
-  mul11.io.a := i1
-  mul11.io.b := w1
-  m11 := mul11.io.res
-
-  val mul12 = Module(new FPMult32())
-  mul12.io.a := i2
-  mul12.io.b := w2
-  m12 := mul12.io.res
-
-  val mul13 = Module(new FPMult32())
-  mul13.io.a := i3
-  mul13.io.b := w3
-  m13 := mul13.io.res
-
-  val mul14 = Module(new FPMult32())
-  mul14.io.a := i4
-  mul14.io.b := w4
-  m14 := mul14.io.res
-
-  val mul15 = Module(new FPMult32())
-  mul15.io.a := i5
-  mul15.io.b := w5
-  m15 := mul15.io.res
-
-  val mul16 = Module(new FPMult32())
-  mul16.io.a := i6
-  mul16.io.b := w6
-  m16 := mul16.io.res
-
-  val mul17 = Module(new FPMult32())
-  mul17.io.a := i7
-  mul17.io.b := w7
-  m17 := mul17.io.res
-
-  val mul18 = Module(new FPMult32())
-  mul18.io.a := i8
-  mul18.io.b := w8
-  m18 := mul18.io.res
-
-  val mul19 = Module(new FPMult32())
-  mul19.io.a := i9
-  mul19.io.b := w9
-  m19 := mul19.io.res
-
-  //Second layer of additions
-
-  /* Let x be the index of the FPAdd32 module to be created
-  Let y = x*2 - 1
-  Let z = x*2
-  val add2x = Module(new FPAdd32())
-  add2x.io.a := m1y
-  add2x.io.b := m1z
-  a2x := add2x.io.res
-  */
-
-  val add21 = Module(new FPAdd32())
-  add21.io.a := m11
-  add21.io.b := m12
-  a21 := add21.io.res
-
-  val add22 = Module(new FPAdd32())
-  add22.io.a := m13
-  add22.io.b := m14
-  a22 := add22.io.res
-
-  val add23 = Module(new FPAdd32())
-  add23.io.a := m15
-  add23.io.b := m16
-  a23 := add23.io.res
-
-  val add24 = Module(new FPAdd32())
-  add24.io.a := m17
-  add24.io.b := m18
-  a24 := add24.io.res
-
-  //Unnecessary add with zero to mantain proper timing
-  val add25 = Module(new FPAdd32())
-  add25.io.a := m19
-  add25.io.b := zero
-  a25 := add25.io.res
-
-  //Third layer of additions
-
-  /* Let x be the index of the FPAdd32 module to be created
-  Let y = x*2 - 1
-  Let z = x*2
-  val add3x = Module(new FPAdd32())
-  add3x.io.a := a2y
-  add3x.io.b := a2z
-  a3x := add3x.io.res
-  */
-
-  val add31 = Module(new FPAdd32())
-  add31.io.a := a21
-  add31.io.b := a22
-  a31 := add31.io.res
-
-  val add32 = Module(new FPAdd32())
-  add32.io.a := a23
-  add32.io.b := a24
-  a32 := add32.io.res
-
-  //Unnecessary add with zero to mantain proper timing
-  val add33 = Module(new FPAdd32())
-  add33.io.a := a25
-  add33.io.b := zero
-  a33 := add33.io.res
-
-  //Fourth layer of additions
-
-  /* Let x be the index of the FPAdd32 module to be created
-  Let y = x*2 - 1
-  Let z = x*2
-  val add4x = Module(new FPAdd32())
-  add4x.io.a := a3y
-  add4x.io.b := a3z
-  a4x := add4x.io.res
-  */
-
-  val add41 = Module(new FPAdd32())
-  add41.io.a := a31
-  add41.io.b := a32
-  a41 := add41.io.res
-
-  //Unnecessary add with zero to mantain proper timing
-  val add42 = Module(new FPAdd32())
-  add42.io.a := a33
-  add42.io.b := zero
-  a42 := add42.io.res
-
-  //Fifth layer of additions
-
-  /* Let x be the index of the FPAdd32 module to be created
-  Let y = x*2 - 1
-  Let z = x*2
-  val add5x = Module(new FPAdd32())
-  add5x.io.a := a4y
-  add5x.io.b := a4z
-  io.stream_out := add5x.io.res
-  */
-
-  val add51 = Module(new FPAdd32())
-  add51.io.a := a41
-  add51.io.b := a42
-  io.stream_out := add51.io.res
 
 
 
+  // Delay grid ready valid interface
+  val delay_grid_ready = Bool()
+  // Should it be a register???
+  val delay_grid_valid = Bool()
+
+  // Actually delay_grid_data is a lot of wires for now. So just keep as i# for now.
+  //val delay_grid_data = UInt(32)
+
+
+  // Number of elements piped into the delay grid, counts 0's used for padding at the end.
+  val d_g_data_counter = Reg(init = UInt(0, 32))
+
+  val s_read :: s_read_write :: s_write :: s_done :: Nil = Enum(UInt(), 4)
+
+  val d_g_state = Reg(init = s_read)
+
+  when (d_g_data_counter < UInt(((window / 2) * (gridx + 1)) - 1)) {
+    d_g_state := s_read
+  } .elsewhen (d_g_data_counter < UInt((gridx * gridy)-1)) {
+    d_g_state := s_read_write
+  } .elsewhen (d_g_data_counter < UInt((gridx * gridy + (window / 2) * (gridx + 1)) - 1)) {
+    d_g_state := s_write
+  } .otherwise {
+    d_g_state := s_done
+  }
+
+  val update_d_g = Bool()
+  // Dont think it should be reg.
+  val d_g_input = UInt()
+
+
+  // Set default of signals which may be overwritten
+
+  in_fifo_ready := Bool(false)
+  update_d_g := Bool(false)
+  d_g_input := UInt(0, 32)
+  delay_grid_valid := Bool(false)
+
+
+  switch(d_g_state) {
+    is (s_read) {
+      in_fifo_ready := Bool(true)
+      when (in_fifo_valid) {
+        d_g_input := in_fifo_data
+        update_d_g := Bool(true)
+      }
+    }
+    is(s_read_write) {
+      when (delay_grid_ready) {
+        in_fifo_ready := Bool(true)
+        when (in_fifo_valid){
+          d_g_input := in_fifo_data
+          update_d_g := Bool(true)
+          delay_grid_valid := Bool(true)
+        }
+      }
+    }
+    is(s_write) {
+      when (delay_grid_ready) {
+        update_d_g := Bool(true)
+        delay_grid_valid := Bool(true)
+      }
+    }
+  }
+
+
+
+  val delay_grid = Module(new DelayGrid(window, gridx))
+
+  delay_grid.io.in := d_g_input
+  delay_grid.io.en := update_d_g
+  val dataVec = delay_grid.io.outVec
+
+  when (update_d_g) {
+    d_g_data_counter := d_g_data_counter + UInt(1)
+  }
+
+
+
+
+
+
+
+
+
+  
+
+
+
+  // Calculation tree ready valid interface
+  val calc_tree_valid = Bool()
+  // Dont think it should be reg
+  val calc_tree_data = UInt()
+  val calc_tree_ready = Bool()
+
+  // Defaults
+  calc_tree_valid := Bool(false)
+
+  val c_t_state = Reg(init = s_read)
+
+  val c_t_enable = Bool()
+
+  delay_grid_ready := Bool(false)
+
+  // Default to stalling the pipeline
+  c_t_enable := Bool(false)
+  val c_t_data_counter = Reg(init = UInt(0, 32))
+  val c_t_advance = Bool()
+  c_t_advance := Bool(false)
+
+  // Total latency due to 1 cycle multiplication delay and 3 cycle add delays.
+  // latency(window) = 1 + 3(ceil(log_2(window^2)))
+  val latency = 1 + 3 * ceil(log(pow(window, 2))/log(2)).toInt
+
+  when (c_t_data_counter < UInt((latency) - 1,32)) {
+    c_t_state := s_read
+  } .elsewhen (c_t_data_counter < UInt((gridx * gridy) - 1, 32)) {
+    c_t_state := s_read_write
+  } .elsewhen (c_t_data_counter < UInt((gridx * gridy + latency) - 1, 32)) {
+    c_t_state := s_write
+  } .otherwise {
+    c_t_state := s_done
+  }
+
+
+
+  switch(c_t_state) {
+    is(s_read) {
+      delay_grid_ready := Bool(true)
+      when (delay_grid_valid) {
+        c_t_advance := Bool(true)
+      }
+    }
+    is(s_read_write) {
+      when(calc_tree_ready) {
+        delay_grid_ready := Bool(true)
+        when (delay_grid_valid) {
+          calc_tree_valid := Bool(true)
+          c_t_advance := Bool(true)
+        }
+      }
+    }
+    is(s_write) {
+      when(calc_tree_ready) {
+        calc_tree_valid := Bool(true)
+        c_t_advance := Bool(true)
+      }
+    }
+  }
+
+
+
+  when(c_t_advance) {
+    c_t_enable := Bool(true)
+    c_t_data_counter := c_t_data_counter + UInt(1, 32)
+  }
+
+
+ 
+  
+
+  val mulResults = FPMult32withCoeff_N(dataVec, VecReverser(coeffVec, pow(window, 2).toInt), c_t_enable, pow(window, 2).toInt)
+
+  calc_tree_data := FPAdd32_N(mulResults, c_t_enable, pow(window, 2).toInt)
+
+  
+
+  
+
+
+
+  // Outbound Fifo interface
+
+  // Wothout this delay I get a timing violation during synthesis
+  val c_t_data_pipe = Reg(UInt())
+  val c_t_valid_pipe = Reg(Bool())
+  c_t_data_pipe := calc_tree_data
+  c_t_valid_pipe := calc_tree_valid
+
+
+  io.out.data := c_t_data_pipe
+  io.out.wr_en := c_t_valid_pipe
+  calc_tree_ready := !io.out.full
 }
 
 

@@ -17,6 +17,7 @@ class FPMult(val n: Int) extends Module {
         val a = Bits(INPUT, n)
         val b = Bits(INPUT, n)
         val res = Bits(OUTPUT, n)
+        val en = Bool(INPUT)
     }
 
     val a_wrap = new FloatWrapper(io.a)
@@ -27,10 +28,22 @@ class FPMult(val n: Int) extends Module {
     val stage1_mantissa = a_wrap.mantissa * b_wrap.mantissa
     val stage1_zero = a_wrap.zero || b_wrap.zero
 
-    val sign_reg = Reg(next = stage1_sign)
-    val exponent_reg = Reg(next = stage1_exponent)
-    val mantissa_reg = Reg(next = stage1_mantissa)
-    val zero_reg = Reg(next = stage1_zero)
+    val sign_reg = Reg(stage1_sign.clone())
+    when (io.en) {
+        sign_reg := stage1_sign
+    }
+    val exponent_reg = Reg(stage1_exponent.clone())
+    when (io.en) {
+        exponent_reg := stage1_exponent
+    }
+    val mantissa_reg = Reg(stage1_mantissa.clone())
+    when (io.en) {
+        mantissa_reg := stage1_mantissa
+    }
+    val zero_reg = Reg(stage1_zero.clone())
+    when (io.en) {
+        zero_reg := stage1_zero
+    }
 
     val stage2_sign = sign_reg
     val stage2_exponent = UInt(width = a_wrap.exponent.getWidth)
