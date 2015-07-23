@@ -196,6 +196,102 @@ object FPMult32withCoeff_N {
 
 
 
+class InboundFifoIO(n: Int) extends Bundle {
+  val empty = Bool(INPUT)
+  val rd_en = Bool(OUTPUT)
+  val data = Bits(INPUT, n)
+}
+
+class OutboundFifoIO(n: Int) extends Bundle {
+  val full = Bool(INPUT)
+  val wr_en = Bool(OUTPUT)
+  val data = Bits(OUTPUT, n)
+}
+
+
+
+
+// Pull from inbound fifo and push to ready-valid interface
+class InFifoRV(n: Int) extends Module {
+  val io = new Bundle {
+    val in = new InboundFifoIO(n)
+    val out = Decoupled(Bits(n))
+  }
+
+  /* Data registers to hold output of fifo while waiting for a ready-valid transaction
+  Two registers are required because there is a cycle delay in issuing a read enable and getting
+  a result. If one register were used then there would have to be a one cycle delay where the 
+  register is invalidated in between every ready-valid transaction. Two registers enable one to be
+  filled and validated by the fifo while the other is consumed and invalidated by the ready-valid
+  interface. */
+  val dataReg0 = Reg(Bits(n))
+  val validReg0 = Reg(init = Bool(false))
+  val dataReg1 = Reg(Bits(n))
+  val validReg1 = Reg(init = Bool(false))
+
+  /* Because two valid entries could be stored, a register has to be maintained to determine the
+  order in which they should be consumed by the ready valid interface */
+  val newestIs0 = Reg(init = Bool(true))
+
+  val lastReadEnable = Reg(init = Bool(false))
+
+  // Issue a read when the fifo is not empty and there is a vacancy in one of the data registers.
+  // !!! Above doesn't seem to be true, majority circuit with last read enable ???
+  val minority = (!validReg0 && !validReg1) || (!validReg0 && !lastReadEnable) || (!validReg1 && !lastReadEnable)
+  val readEnable = !io.in.empty && (minority || io.out.ready)
+
+  io.in.rd_en := readEnable
+  lastReadEnable := readEnable
+
+  /* When a read was issued last cycle, store the data and validate it in whichever space is
+  invalid (one must exist in order for the read to have been issued last cycle). */
+  when (lastReadEnable) {
+    // If the first space is valid then the second space must be invalid.
+    when (validReg0) {
+      dataReg1 := io.in.data
+      validReg1 := Bool(true)
+      newestIs0 := Bool(false)
+    } .otherwise {
+      dataReg0 := io.in.data
+      validReg0 := Bool(true)
+      newestIs0 := Bool(true)
+    }
+  }
+
+  // When either slot has valid data, the modules output should be valid.
+  val valid = validReg0 || validReg1
+  io.out.valid := valid
+
+  /* Need to determine which space to present to the output, as well as which to invalidate
+  upon the completion of a reay-valid transaction. */
+  val presentedIs0 = Bool()
+
+  /* Present space 0 when it is the only valid space or when both are valid but space 0 is 
+  the oldest. This means that space 1 will be unconditionally presented when space 0 is invalid,
+  but if both spaces are invalid then the the overall module will be invalid anyways. */
+  when (validReg0 && (!validReg1 || !newestIs0)) {
+    presentedIs0 := Bool(true)
+  } .otherwise {
+    presentedIs0 := Bool(false)
+  }
+
+  // Present the appropriate data register to the ready-valid interface's bit field.
+  when(presentedIs0) {
+    io.out.bits := dataReg0
+  } .otherwise {
+    io.out.bits := dataReg1
+  }
+
+  // When a ready-valid transaction occurs, invalidate the now vacant space.
+  when (valid && io.out.ready) {
+    when (presentedIs0) {
+      validReg0 := Bool(false)
+    } .otherwise {
+      validReg1 := Bool(false)
+    }
+  }
+
+}
 
 
 
@@ -207,41 +303,38 @@ class Stencil extends Module {
   val DataWidth = 32
 
   val io = new Bundle { 
-    val in = new Bundle { 
-      val rd_en = Bool(OUTPUT)
-      val data = UInt(INPUT, DataWidth)
-      val empty = Bool(INPUT)
-    }
-
-    val out = new Bundle { 
-      val wr_en = Bool(OUTPUT)
-      val data = UInt(OUTPUT, DataWidth)
-      val full = Bool(INPUT)
-    }
-
-    val coeff = new Bundle { 
-      val rd_en = Bool(OUTPUT)
-      val data = UInt(INPUT, DataWidth)
-      val empty = Bool(INPUT)
-    }
+    val in = new InboundFifoIO(DataWidth)
+    val out = new OutboundFifoIO(DataWidth)
+    val coeff = new InboundFifoIO(DataWidth)
   }
 
 
 
-  // Make the in FIFO interface appear as a Ready Valid interface ???(Standard fifo interface already Ready valid not FWFT)???
-
+  
+  /*
   val in_fifo_ready = Bool()
   val in_fifo_valid = Reg(init = Bool(false))
   // Dont think it should be reg
   val in_fifo_data = UInt()
+  */
 
+
+  /*
   val in_fetch = (!io.in.empty && (in_fifo_ready || !in_fifo_valid))
   io.in.rd_en := in_fetch
   // Valid is a flip flop so 1 cycle delay between fetching and valid being asserted matches
   // the one cycle delay between rd_en being asserted and valid data being presented.
   in_fifo_valid := in_fetch
   in_fifo_data := io.in.data
+  */
 
+
+
+  val inFifoModule = Module(new InFifoRV(32))
+  inFifoModule.io.in <> io.in
+  val in_fifo_ready = inFifoModule.io.out.ready
+  val in_fifo_valid = inFifoModule.io.out.valid
+  val in_fifo_data = inFifoModule.io.out.bits
   
 
 
