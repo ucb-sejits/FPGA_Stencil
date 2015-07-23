@@ -263,7 +263,21 @@ class FPAdd(val n: Int) extends Module {
     stage4.io.exp_in := stage3.io.exp_out
     stage4.io.mant_in := stage3.io.mant_out
 
-    io.res := Cat(stage3.io.sign_out, stage4.io.exp_out, stage4.io.mant_out)
+
+    // Critical path between output of one add and input of next so add delay before output
+    val sign_out_reg = Reg(stage3.io.sign_out.clone())
+    val exp_out_reg = Reg(stage4.io.exp_out.clone())
+    val mant_out_reg = Reg(stage4.io.mant_out.clone())
+
+    when (io.en) {
+        sign_out_reg := stage3.io.sign_out
+        exp_out_reg := stage4.io.exp_out
+        mant_out_reg := stage4.io.mant_out
+    }
+
+    //io.res := Cat(stage3.io.sign_out, stage4.io.exp_out, stage4.io.mant_out)
+    io.res := Cat(sign_out_reg, exp_out_reg, mant_out_reg)
+
 }
 
 class FPAdd32 extends FPAdd(32) {}

@@ -147,14 +147,16 @@ class FPAdd32Dummy extends Module {
   val delay_1 = Reg(UInt(32))
   val delay_2 = Reg(UInt(32))
   val delay_3 = Reg(UInt(32))
+  val delay_4 = Reg(UInt(32))
 
   when (io.en) {
     delay_1 := io.a
     delay_2 := delay_1
     delay_3 := delay_2
+    delay_4 := delay_3
   }
 
-  io.res := delay_3
+  io.res := delay_4
 }
 
 
@@ -470,9 +472,9 @@ class Stencil extends Module {
   val c_t_advance = Bool()
   c_t_advance := Bool(false)
 
-  // Total latency due to 1 cycle multiplication delay and 3 cycle add delays.
-  // latency(window) = 1 + 3(ceil(log_2(window^2)))
-  val latency = 1 + 3 * ceil(log(pow(window, 2))/log(2)).toInt
+  // Total latency due to 1 cycle multiplication delay and 4 cycle add delays.
+  // latency(window) = 1 + 4(ceil(log_2(window^2)))
+  val latency = 1 + 4 * ceil(log(pow(window, 2))/log(2)).toInt
 
   when (c_t_data_counter < UInt((latency) - 1,32)) {
     c_t_state := s_read
