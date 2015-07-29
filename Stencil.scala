@@ -308,6 +308,7 @@ class Stencil extends Module {
     val in = new InboundFifoIO(DataWidth)
     val out = new OutboundFifoIO(DataWidth)
     val coeff = new InboundFifoIO(DataWidth)
+    val done = Bool(OUTPUT)
   }
 
 
@@ -466,6 +467,8 @@ class Stencil extends Module {
 
   delay_grid_ready := Bool(false)
 
+  io.done := Bool(false)
+
   // Default to stalling the pipeline
   c_t_enable := Bool(false)
   val c_t_data_counter = Reg(init = UInt(0, 32))
@@ -510,6 +513,9 @@ class Stencil extends Module {
         c_t_advance := Bool(true)
       }
     }
+    is(s_done) {
+      io.done := Bool(true)
+    }
   }
 
 
@@ -536,14 +542,18 @@ class Stencil extends Module {
   // Outbound Fifo interface
 
   // Wothout this delay I get a timing violation during synthesis
+  /*
   val c_t_data_pipe = Reg(UInt())
   val c_t_valid_pipe = Reg(Bool())
   c_t_data_pipe := calc_tree_data
   c_t_valid_pipe := calc_tree_valid
 
-
   io.out.data := c_t_data_pipe
   io.out.wr_en := c_t_valid_pipe
+  */
+  io.out.data := calc_tree_data
+  io.out.wr_en := calc_tree_valid
+  
   calc_tree_ready := !io.out.full
 }
 

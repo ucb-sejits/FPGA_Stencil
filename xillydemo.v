@@ -72,6 +72,8 @@ module xillydemo
   wire io_coeff_rd_en;
   wire [31:0] io_coeff_data;
   wire io_coeff_empty;
+  wire io_done;
+  wire reset;
 
    // Note that none of the ARM processor's direct connections to pads is
    // attached in the instantion below. Normally, they should be connected as
@@ -220,6 +222,7 @@ module xillydemo
    Stencil test_stencil
     (
       .clk(bus_clk),
+      .reset(reset),
       .io_in_rd_en(io_in_rd_en),
       .io_in_data(io_in_data),
       .io_in_empty(io_in_empty),
@@ -228,10 +231,14 @@ module xillydemo
       .io_out_full(io_out_full),
       .io_coeff_rd_en(io_coeff_rd_en),
       .io_coeff_data(io_coeff_data),
-      .io_coeff_empty(io_coeff_empty)
+      .io_coeff_empty(io_coeff_empty),
+      .io_done(io_done)
       );
 
-   assign  user_r_data_read_eof = 0;
+   wire reset_eof = io_done && user_r_data_read_empty;
+   assign  user_r_data_read_eof = reset_eof;
+   assign  reset = reset_eof;
+
 
 
    
